@@ -180,7 +180,6 @@ impl VulkanHelper {
 
             layout(set = 0, binding = 0, rgba8) uniform image2D img;
 
-
             struct Ray {
                 vec3 origin;
                 vec3 direction;
@@ -236,7 +235,7 @@ impl VulkanHelper {
                 return true;
             }
 
-            float aspect_ratio = imageSize(img).x / imageSize(img).y;
+            float aspect_ratio = float(imageSize(img).x) / float(imageSize(img).y);
             uint image_width = imageSize(img).x;
             uint image_height = imageSize(img).y;
 
@@ -258,8 +257,8 @@ impl VulkanHelper {
             );
 
             vec3 calculate_color(in uvec2 xy) {
-                float u = float(xy.x) / (float(imageSize(img).x-1.0));
-                float v = abs(float(xy.y) / (float(imageSize(img).y-1.0))-1);
+                float u = float(xy.x) / (image_width-1.0);
+                float v = abs(float(xy.y) / (image_height-1.0)-1);
                 Ray ray = Ray(origin, lower_left_corner + u*horizontal + v*vertical - origin);
 
                 HitRecord temp_record = HitRecord(vec3(0.0,0.0,0.0),vec3(0.0,0.0,0.0),0.0,false);
