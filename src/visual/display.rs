@@ -26,8 +26,6 @@ impl Display {
         canvas.clear();
         canvas.present();
 
-        let event_pump = context.event_pump()?;
-
         Ok(Self { context, canvas })
     }
 
