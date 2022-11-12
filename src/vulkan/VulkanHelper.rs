@@ -2,26 +2,25 @@ use std::sync::Arc;
 
 
 use vulkano::instance::{Instance, InstanceCreateInfo};
-use vulkano::{sync, VulkanLibrary};
-use vulkano::command_buffer::{CopyImageToBufferInfo, PrimaryAutoCommandBuffer};
-use vulkano::device::{Device, DeviceCreateInfo, Queue, QueueCreateInfo};
-use vulkano::pipeline::ComputePipeline;
-use vulkano::sync::GpuFuture;
 
+use vulkano::{sync, sync::GpuFuture, VulkanLibrary};
+
+use vulkano::command_buffer::{CopyImageToBufferInfo, PrimaryAutoCommandBuffer,AutoCommandBufferBuilder, CommandBufferUsage};
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
-use vulkano::image::{ImageDimensions, StorageImage};
-use vulkano::format::Format;
-use vulkano::pipeline::Pipeline;
+
+use vulkano::device::{Device, DeviceCreateInfo, Queue, QueueCreateInfo};
+
+use vulkano::pipeline::{PipelineBindPoint, ComputePipeline, Pipeline};
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage};
-use vulkano::pipeline::PipelineBindPoint;
-use vulkano::image::view::ImageView;
+
+use vulkano::image::{view::ImageView, ImageDimensions, StorageImage};
+use vulkano::format::Format;
+
 use bytemuck::{Zeroable, Pod};
 
 pub struct VulkanHelper {
     command_buffer: Arc<PrimaryAutoCommandBuffer>,
     buffer: Arc<CpuAccessibleBuffer<[u8]>>,
-    size_buffer: Arc<CpuAccessibleBuffer<Size>>,
     compute_pipeline: Arc<ComputePipeline>,
     queue: Arc<Queue>,
     device: Arc<Device>,
@@ -47,14 +46,13 @@ impl VulkanHelper {
             Some(self.queue.queue_family_index()),
         ).unwrap();
 
+        let view = ImageView::new_default(image.clone()).unwrap();
+
         let buffer =
             CpuAccessibleBuffer::from_iter(self.device.clone(), BufferUsage {
                 transfer_dst: true,
                 ..Default::default()
             }, false, (0..width * height * 4).map(|_| 0u8)).expect("failed to create buffer");
-
-
-        let view = ImageView::new_default(image.clone()).unwrap();
 
 
         let layout = self.compute_pipeline.layout().set_layouts().get(0).unwrap();
@@ -160,12 +158,6 @@ impl VulkanHelper {
                 transfer_dst: true,
                 ..Default::default()
             }, false, (0..width * height * 4).map(|_| 0u8)).expect("failed to create buffer");
-
-        let size_buffer =
-            CpuAccessibleBuffer::from_data(device.clone(), BufferUsage {
-                uniform_buffer: true,
-                ..Default::default()
-            }, false, Size {x: width, y: height}).expect("failed to create buffer");
 
         let view = ImageView::new_default(image.clone()).unwrap();
 
@@ -341,7 +333,6 @@ impl VulkanHelper {
         VulkanHelper {
             command_buffer,
             buffer,
-            size_buffer,
             compute_pipeline,
             queue,
             device,

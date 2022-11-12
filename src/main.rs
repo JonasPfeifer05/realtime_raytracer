@@ -15,7 +15,6 @@ fn main() {
 
 fn start(width: u32, height: u32) -> Result<(), String>{
     let helper = VulkanHelper::new(width, height);
-
     render_loop(width, height, helper);
 
     Ok(())
