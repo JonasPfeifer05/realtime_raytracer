@@ -2,9 +2,10 @@ mod visual;
 mod vulkan;
 
 
-
-use std::time::{Instant};
+use std::thread;
+use std::time::{Duration, Instant};
 use sdl2::event::{Event, WindowEvent};
+use sdl2::keyboard::Keycode;
 use crate::visual::display::Display;
 use crate::vulkan::VulkanHelper::VulkanHelper;
 
@@ -39,6 +40,9 @@ fn render_loop(width: u32, height: u32, mut helper: VulkanHelper) {
                     Event::Window { win_event: WindowEvent::Resized(width, height), .. } => {
                         helper.resize(width as u32, height as u32);
                     }
+                    Event::KeyDown {keycode: Some(Keycode::Space), ..} => {
+                        helper.next_frame();
+                    }
                     Event::Window { win_event: WindowEvent::Close, .. } => { break 'render_loop; }
                     _ => {}
                 }
@@ -49,15 +53,11 @@ fn render_loop(width: u32, height: u32, mut helper: VulkanHelper) {
                 // GETTING THE PIXEL BUFFER OF THE WINDOW
                 let bytes_buffer = helper.render_frame();
                 let calculated_bytes = bytes_buffer.read().unwrap();
+                helper.next_frame();
 
                 let mut surface = display.get_surface(&events);
 
                 let bytes = surface.without_lock_mut().unwrap();
-
-
-                /*for i in 0..bytes.len() {
-                    bytes[i] = ((calculated_bytes[i] as u32+bytes[i] as u32)/2) as u8;
-                }*/
 
                 bytes.clone_from_slice(&*calculated_bytes);
 
