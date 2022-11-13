@@ -21,9 +21,9 @@ use bytemuck::{Zeroable, Pod};
 
 pub struct VulkanHelper {
     command_buffer: Arc<PrimaryAutoCommandBuffer>,
-    buffer: Arc<CpuAccessibleBuffer<[u8]>>,
-    camera:Arc<CpuAccessibleBuffer<Camera>>,
     compute_pipeline: Arc<ComputePipeline>,
+    avarage_buffer: Arc<CpuAccessibleBuffer<[u8]>>,
+    render_data: Arc<CpuAccessibleBuffer<Camera>>,
     queue: Arc<Queue>,
     device: Arc<Device>,
 }
@@ -67,7 +67,7 @@ impl Camera {
         lower_left_corner[2] -= focal_length;
 
         Self {
-            frame: 0,
+            frame: 1,
             width,
             height,
             origin_x: origin[0],
@@ -88,43 +88,35 @@ impl Camera {
 
 impl VulkanHelper {
     pub fn next_frame(&mut self) {
-        self.camera.write().unwrap().frame += 1;
+        self.render_data.write().unwrap().frame += 1;
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        let image = StorageImage::new(
-            self.device.clone(),
-            ImageDimensions::Dim2d {
-                width,
-                height,
-                array_layers: 1, // images can be arrays of layers
-            },
-            Format::R8G8B8A8_UNORM,
-            Some(self.queue.queue_family_index()),
-        ).unwrap();
-
-        let view = ImageView::new_default(image.clone()).unwrap();
-
-        let buffer =
+        let progressive_buffer =
             CpuAccessibleBuffer::from_iter(self.device.clone(), BufferUsage {
+                storage_buffer: true,
                 transfer_dst: true,
                 ..Default::default()
-            }, false, (0..width * height * 4).map(|_| 0u8)).expect("failed to create buffer");
+            }, false, (0..width * height * 4).map(|_| 0f32)).expect("failed to create buffer");
 
-        let camera =
-            CpuAccessibleBuffer::from_data(self.device.clone(), BufferUsage {
-                uniform_buffer: true,
+        let avarage_buffer =
+            CpuAccessibleBuffer::from_iter(self.device.clone(), BufferUsage {
+                storage_buffer: true,
+                transfer_dst: true,
                 ..Default::default()
-            }, false, Camera::new(width,height)).expect("failed to create buffer");
+            }, false, (0..width * height*4).map(|_| 0u8)).expect("failed to create buffer");
 
+        *self.render_data.write().unwrap() = Camera::new(width,height);
 
         let layout = self.compute_pipeline.layout().set_layouts().get(0).unwrap();
-        let set = PersistentDescriptorSet::new(
+        let mut set = PersistentDescriptorSet::new(
             layout.clone(),
             [
-                WriteDescriptorSet::image_view(0, view.clone()),
-                WriteDescriptorSet::buffer(1, camera.clone()),
-            ] // 0 is the binding
+                WriteDescriptorSet::buffer(0, self.render_data.clone()),
+                WriteDescriptorSet::buffer(1, progressive_buffer.clone()),
+                WriteDescriptorSet::buffer(2, avarage_buffer.clone()),
+
+            ], // 0 is the binding
         ).unwrap();
 
 
@@ -143,17 +135,12 @@ impl VulkanHelper {
                 set,
             )
             .dispatch([((width * 2) as f32 / 8 as f32).ceil() as u32 + 1, ((height * 2) as f32 / 8 as f32).ceil() as u32 + 1, 1])
-            .unwrap()
-            .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
-                image.clone(),
-                buffer.clone(),
-            ))
             .unwrap();
 
         let command_buffer = Arc::new(builder.build().unwrap());
 
         self.command_buffer = command_buffer;
-        self.buffer = buffer;
+        self.avarage_buffer = avarage_buffer;
     }
 
     pub fn render_frame(&self) -> Arc<CpuAccessibleBuffer<[u8]>> {
@@ -165,7 +152,7 @@ impl VulkanHelper {
 
         future.wait(None).unwrap();
 
-        self.buffer.clone()
+        self.avarage_buffer.clone()
     }
 
     pub fn new(width: u32, height: u32) -> Self {
@@ -207,63 +194,28 @@ impl VulkanHelper {
 
         let queue = queues.next().unwrap();
 
-
-        let image = StorageImage::new(
-            device.clone(),
-            ImageDimensions::Dim2d {
-                width,
-                height,
-                array_layers: 1, // images can be arrays of layers
-            },
-            Format::R8G8B8A8_UNORM,
-            Some(queue.queue_family_index()),
-        ).unwrap();
-
-        let buffer =
-            CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage {
-                transfer_dst: true,
-                ..Default::default()
-            }, false, (0..width * height * 4).map(|_| 0u8)).expect("failed to create buffer");
-
-        let camera =
-            CpuAccessibleBuffer::from_data(device.clone(), BufferUsage {
-                uniform_buffer: true,
-                ..Default::default()
-            }, false, Camera::new(width, height)).expect("failed to create buffer");
-
-        let view = ImageView::new_default(image.clone()).unwrap();
-
         mod cs {
         vulkano_shaders::shader! {
         ty: "compute",
-        src: "
+        src:"
             #version 450
-
-            float PHI = 1.61803398874989484820459;  // Φ = Golden Ratio
-
-            float gold_noise(in vec2 xy, in float seed){
-                   return fract(tan(distance(xy*PHI, xy)*seed)*xy.x);
-            }
 
             layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-            layout(set = 0, binding = 0, rgba8) uniform image2D img;
+            float PHI = 1.61803398874989484820459;  // Φ = Golden Ratio
 
+            float gold_noise(vec2 xy, float seed){
+                   return fract(tan(distance(xy*PHI, xy)*seed)*xy.x);
+            }
 
             struct Ray {
                 vec3 origin;
                 vec3 direction;
             };
-            vec3 ray_at(in Ray ray, in float t) {
+            vec3 ray_at(Ray ray, float t) {
                 return ray.origin + ray.direction * t;
             }
 
-            struct CameraReal {
-                vec3 origin;
-                vec3 lower_left_corner;
-                vec3 horizontal;
-                vec3 vertical;
-            };
 
             struct HitRecord {
                 vec3 point;
@@ -271,7 +223,7 @@ impl VulkanHelper {
                 float t;
                 bool front_face;
             };
-            void set_face_normal(out HitRecord record, in Ray ray, in vec3 outward_normal) {
+            void set_face_normal(inout HitRecord record, Ray ray, vec3 outward_normal) {
                 record.front_face = dot(ray.direction, outward_normal) < 0;
                 if (record.front_face) {
                     record.normal = outward_normal;
@@ -285,7 +237,7 @@ impl VulkanHelper {
                 float radius;
             };
 
-            bool hit_sphere(in Sphere sphere, in Ray ray, in float t_min, in float t_max, out HitRecord record) {
+            bool hit_sphere(Sphere sphere, Ray ray, float t_min, float t_max, inout HitRecord record) {
                 vec3 oc = ray.origin - sphere.center;
                 float a = ray.direction.x*ray.direction.x+ray.direction.y*ray.direction.y+ray.direction.z*ray.direction.z;
                 float half_b = dot(oc, ray.direction);
@@ -312,10 +264,7 @@ impl VulkanHelper {
                 return true;
             }
 
-
-            // Camera
-
-            struct Camera {
+            layout(set = 0, binding = 0) buffer RenderData {
                 uint frame;
                 uint width;
                 uint height;
@@ -331,40 +280,103 @@ impl VulkanHelper {
                 float vertical_x;
                 float vertical_y;
                 float vertical_z;
+            } renderData;
+
+            struct CameraReal {
+                uint frame;
+                uint width;
+                uint height;
+                vec3 origin;
+                vec3 lower_left_corner;
+                vec3 horizontal;
+                vec3 vertical;
             };
-
-            layout(set = 0, binding = 1) uniform CameraData {
-                Camera cam;
-            } camera_data;
-
-            Ray get_ray(in CameraReal real, in float u, in float v) {
+            Ray get_ray(CameraReal real, float u, float v) {
                 return Ray(real.origin, real.lower_left_corner + u*real.horizontal + v*real.vertical - real.origin);
             }
 
-            const uint sphere_size = 2;
-            const Sphere[] spheres = Sphere[sphere_size](
-                Sphere(vec3(0.0,-100.0,-1.0),100),
-                Sphere(vec3(0.0,0.0,-1.0),0.5)
+            CameraReal realCamera = CameraReal(
+                renderData.frame,renderData.width,renderData.height,
+                vec3(renderData.origin_x,renderData.origin_y,renderData.origin_z),
+                vec3(renderData.lower_left_corner_x,renderData.lower_left_corner_y,renderData.lower_left_corner_z),
+                vec3(renderData.horizontal_x,renderData.horizontal_y,renderData.horizontal_z),
+                vec3(renderData.vertical_x,renderData.vertical_y,renderData.vertical_z)
             );
 
-            vec3 calculate_color(in uvec2 xy, float microstep) {
-                float u = float(xy.x) / (camera_data.cam.width-1.0);
-                u += fract(gold_noise(xy.xy, camera_data.cam.frame+microstep)) / float(camera_data.cam.width);
-                float v = abs(float(xy.y) / (camera_data.cam.height-1.0)-1);
-                v += fract(gold_noise(xy.xy, camera_data.cam.frame+microstep+0.5)) / float(camera_data.cam.height);
+            vec3 random_in_unit_sphere(uvec2 xy, float seed) {
 
-                CameraReal real = CameraReal(
-                    vec3(camera_data.cam.origin_x,camera_data.cam.origin_y,camera_data.cam.origin_z),
-                    vec3(camera_data.cam.lower_left_corner_x,camera_data.cam.lower_left_corner_y,camera_data.cam.lower_left_corner_z),
-                    vec3(camera_data.cam.horizontal_x,camera_data.cam.horizontal_y,camera_data.cam.horizontal_z),
-                    vec3(camera_data.cam.vertical_x,camera_data.cam.vertical_y,camera_data.cam.vertical_z));
+                while (true) {
+                    float seed_add = 0.1;
+                    vec3 rand = vec3(fract(gold_noise(xy, seed+seed_add))*2.0-1.0,fract(gold_noise(xy, seed+seed_add+0.1))*2.0-1.0,fract(gold_noise(xy, seed+seed_add+0.2))*2.0-1.0);
+                    seed_add += 0.3;
+                    if (rand.length() >= 1) { return rand; }
+                }
+            }
 
-                Ray ray = get_ray(real, u, v);
+            layout(set = 0, binding = 1) buffer ProgressiveBuffer {
+                float[] data;
+            } progressiveBuffer;
+
+            layout(set = 0, binding = 2) buffer AvarageBuffer {
+                uint data[];
+            } avarageBuffer;
+
+            const uint sphere_size = 2;
+            const Sphere[] spheres = Sphere[sphere_size](
+                Sphere(vec3(0.0,0.0,-1.0),0.5),
+                Sphere(vec3(0.0,-100.5,-1.0),100)
+            );
+
+            uint max_depth = 50;
+
+            vec3 calculate_color(uvec2 xy, inout Ray ray, float microstep, inout uint depth) {
+
+
+                vec3 final_color = vec3(0.0,0.0,0.0);
+                float absorb_mul = 1.0;
+
+                Ray changing = ray;
+
+                while (depth > 0) {
+
+                    HitRecord temp_record = HitRecord(vec3(0.0,0.0,0.0),vec3(0.0,0.0,0.0),0.0,false);
+                    HitRecord record = HitRecord(vec3(0.0,0.0,0.0),vec3(0.0,0.0,0.0),0.0,false);
+                    bool hit_anything = false;
+                    float closest = 1.0/0.0;
+
+                    for (int i = 0; i<sphere_size; i++) {
+                        if(hit_sphere(spheres[i], changing, 0.001, closest, temp_record)) {
+                            hit_anything = true;
+                            closest = temp_record.t;
+                            record = temp_record;
+                        }
+                    }
+
+                    if (!hit_anything) {
+                        vec3 unit = normalize(changing.direction);
+                        float t = 0.5 * (unit.y + 1.0);
+
+                        final_color = (1.0-t)*vec3(1.0,1.0,1.0) + t*vec3(0.5,0.7,1.0);
+
+                        final_color *= absorb_mul;
+
+                        break;
+                    }
+
+                    vec3 target = record.point + record.normal + random_in_unit_sphere(xy, realCamera.frame + microstep + 1.0/float(max_depth)*depth);
+                    changing = Ray(record.point, target - record.point);
+
+                    absorb_mul *= 0.5;
+
+                    depth -= 1;
+                }
+                return final_color;
+
 
                 HitRecord temp_record = HitRecord(vec3(0.0,0.0,0.0),vec3(0.0,0.0,0.0),0.0,false);
                 HitRecord record = HitRecord(vec3(0.0,0.0,0.0),vec3(0.0,0.0,0.0),0.0,false);
                 bool hit_anything = false;
-                float closest = 1.0 / 0.0;
+                float closest = 1000;
 
                 for (int i = 0; i<sphere_size; i++) {
                     if(hit_sphere(spheres[i], ray, 0, closest, temp_record)) {
@@ -378,23 +390,88 @@ impl VulkanHelper {
                     return 0.5*(record.normal+vec3(1.0,1.0,1.0));
                 }
 
+
                 vec3 unit = normalize(ray.direction);
                 float t = 0.5 * (unit.y + 1.0);
 
                 return (1.0-t)*vec3(1.0,1.0,1.0) + t*vec3(0.5,0.7,1.0);
+
+            }
+
+            uint color_to_int(in vec3 color) {
+                uint rgba = 0;
+                rgba += uint(color.z * 255);
+                rgba += uint(color.y * 255) << 8;
+                rgba += uint(color.x * 255) << 16;
+                rgba += uint(1 * 255) << 24;
+
+                return rgba;
+            }
+
+            void write_color(vec3 color) {
+                uvec2 position = gl_GlobalInvocationID.xy;
+                uint index = position.x + realCamera.width * position.y;
+
+                progressiveBuffer.data[index*4] += color.x;
+                progressiveBuffer.data[index*4+1] += color.y;
+                progressiveBuffer.data[index*4+2] += color.z;
+            }
+
+            void output_color() {
+                uvec2 position = gl_GlobalInvocationID.xy;
+                uint index = position.x + realCamera.width * position.y;
+
+                vec3 color = vec3(progressiveBuffer.data[index*4],progressiveBuffer.data[index*4+1],progressiveBuffer.data[index*4+2]) / renderData.frame;
+
+                avarageBuffer.data[index] = color_to_int(color);
+            }
+
+            vec3 gamma_correction(vec3 color) {
+                return vec3(sqrt(color.x),sqrt(color.y),sqrt(color.z));
             }
 
             void main() {
-                vec3 color;
-                color = calculate_color(gl_GlobalInvocationID.xy, 0.0);
+                if (gl_GlobalInvocationID.x >= realCamera.width) return;
 
-                imageStore(img, ivec2(gl_GlobalInvocationID.xy), (imageLoad(img, ivec2(gl_GlobalInvocationID.xy)) + vec4(color.zyx, 1.0))/2.0);
+                uvec2 xy = gl_GlobalInvocationID.xy;
+
+                float u = float(xy.x) / (renderData.width-1.0);
+                u += fract(gold_noise(xy.xy, renderData.frame)) / float(renderData.width);
+                float v = abs(float(xy.y) / (renderData.height-1.0)-1);
+                v += fract(gold_noise(xy.xy, renderData.frame+0.5)) / float(renderData.height);
+
+                Ray ray = get_ray(realCamera, u, v);
+
+                vec3 color = calculate_color(xy,ray,0,max_depth);
+
+                write_color(gamma_correction(color));
+                output_color();
             }
             "
         }
         }
         let shader = cs::load(device.clone()).expect("Failed to create shader!");
 
+        let render_data =
+            CpuAccessibleBuffer::from_data(device.clone(), BufferUsage {
+                storage_buffer: true,
+                transfer_dst: true,
+                ..Default::default()
+            }, false, Camera::new(width, height)).expect("failed to create buffer");
+
+        let progressive_buffer =
+            CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage {
+                storage_buffer: true,
+                transfer_dst: true,
+                ..Default::default()
+            }, false, (0..width * height * 4).map(|_| 0f32)).expect("failed to create buffer");
+
+        let avarage_buffer =
+            CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage {
+                storage_buffer: true,
+                transfer_dst: true,
+                ..Default::default()
+            }, false, (0..width * height*4).map(|_| 0u8)).expect("failed to create buffer");
 
         let compute_pipeline = ComputePipeline::new(
             device.clone(),
@@ -409,8 +486,10 @@ impl VulkanHelper {
         let mut set = PersistentDescriptorSet::new(
             layout.clone(),
             [
-                WriteDescriptorSet::image_view(0, view.clone()),
-                WriteDescriptorSet::buffer(1, camera.clone()),
+                WriteDescriptorSet::buffer(0, render_data.clone()),
+                WriteDescriptorSet::buffer(1, progressive_buffer.clone()),
+                WriteDescriptorSet::buffer(2, avarage_buffer.clone()),
+
             ], // 0 is the binding
         ).unwrap();
 
@@ -430,11 +509,6 @@ impl VulkanHelper {
                 set,
             )
             .dispatch([((width * 2) as f32 / 8 as f32).ceil() as u32 + 1, ((height * 2) as f32 / 8 as f32).ceil() as u32 + 1, 1])
-            .unwrap()
-            .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
-                image.clone(),
-                buffer.clone(),
-            ))
             .unwrap();
 
         let command_buffer = Arc::new(builder.build().unwrap());
@@ -442,9 +516,9 @@ impl VulkanHelper {
 
         VulkanHelper {
             command_buffer,
-            buffer,
-            camera,
             compute_pipeline,
+            avarage_buffer,
+            render_data,
             queue,
             device,
         }
