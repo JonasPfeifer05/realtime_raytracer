@@ -41,7 +41,6 @@ fn render_loop(width: u32, height: u32, mut helper: VulkanHelper) {
                         helper.resize(width as u32, height as u32);
                     }
                     Event::KeyDown {keycode: Some(Keycode::Space), ..} => {
-                        helper.next_frame();
                     }
                     Event::Window { win_event: WindowEvent::Close, .. } => { break 'render_loop; }
                     _ => {}
@@ -52,17 +51,19 @@ fn render_loop(width: u32, height: u32, mut helper: VulkanHelper) {
             {
                 // GETTING THE PIXEL BUFFER OF THE WINDOW
                 let bytes_buffer = helper.render_frame();
-                let calculated_bytes = bytes_buffer.read().unwrap();
+                if helper.current_frame() % 20 == 0 {
+                    let calculated_bytes = bytes_buffer.read().unwrap();
+
+                    let mut surface = display.get_surface(&events);
+
+                    let bytes = surface.without_lock_mut().unwrap();
+
+                    bytes.clone_from_slice(&*calculated_bytes);
+
+                    // UPDATE WINDOW
+                    let _ = surface.update_window().unwrap();
+                }
                 helper.next_frame();
-
-                let mut surface = display.get_surface(&events);
-
-                let bytes = surface.without_lock_mut().unwrap();
-
-                bytes.clone_from_slice(&*calculated_bytes);
-
-                // UPDATE WINDOW
-                let _ = surface.update_window().unwrap();
             }
 
         // STOPPING TIME FOR DELTA TIME

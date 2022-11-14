@@ -91,6 +91,10 @@ impl VulkanHelper {
         self.render_data.write().unwrap().frame += 1;
     }
 
+    pub fn current_frame(&self) -> u32 {
+        self.render_data.read().unwrap().frame
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         let progressive_buffer =
             CpuAccessibleBuffer::from_iter(self.device.clone(), BufferUsage {
@@ -435,17 +439,17 @@ impl VulkanHelper {
 
                 uvec2 xy = gl_GlobalInvocationID.xy;
 
-                float u = float(xy.x) / (renderData.width-1.0);
-                u += fract(gold_noise(xy.xy, renderData.frame)) / float(renderData.width);
-                float v = abs(float(xy.y) / (renderData.height-1.0)-1);
-                v += fract(gold_noise(xy.xy, renderData.frame+0.5)) / float(renderData.height);
+                float u = (float(xy.x)+fract(gold_noise(xy.xy, renderData.frame))) / (renderData.width-1.0);
+                float v = abs((float(xy.y)+fract(gold_noise(xy.xy, renderData.frame+0.5))) / (renderData.height-1.0)-1);
 
                 Ray ray = get_ray(realCamera, u, v);
 
-                vec3 color = calculate_color(xy,ray,0,max_depth);
+                vec3 color = calculate_color(xy,ray,renderData.frame,max_depth);
 
                 write_color(gamma_correction(color));
-                output_color();
+                if (realCamera.frame % 20 == 0) {
+                    output_color();
+                }
             }
             "
         }
